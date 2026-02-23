@@ -51,6 +51,8 @@ def get_email_template(title, company, name, job_description=""):
             Your goal is to pitch Dedolytics as an alternative or augmentation to hiring this full-time role internally. 
             Highlight that using a specialized consulting strike-team avoids the timeline, overhead, and tax costs associated 
             with a standard full-time hire, while providing immediate, expert-level leverage for their data roadmap.
+            Crucially, emphasize how Dedolytics brings significantly more robust value execution, speed, and cross-industry 
+            experience than a normal single candidate could provide.
             
             Job Description context (if any):
             {job_description[:1000]} # Trimmed to avoid excessive context sizes
