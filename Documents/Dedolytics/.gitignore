@@ -1,0 +1,7 @@
+
+# CRM Bot Config
+crm/.env
+crm/venv/
+crm/crm_database.db
+crm/__pycache__/
+
