@@ -29,9 +29,10 @@ async def scrape_linkedin_jobs(keyword):
     For high volume, a premium API or authenticated session is highly recommended.
     """
     url_keyword = urllib.parse.quote(keyword)
-    url = f"https://www.linkedin.com/jobs/search?keywords={url_keyword}&location=United%20States&geoId=103644278&trk=public_jobs_jobs-search-bar_search-submit&position=1&pageNum=0"
+    # Added f_TPR=r259200 to strictly filter for jobs posted in the last 3 days (259200 seconds)
+    url = f"https://www.linkedin.com/jobs/search?keywords={url_keyword}&location=United%20States&geoId=103644278&f_TPR=r259200&trk=public_jobs_jobs-search-bar_search-submit&position=1&pageNum=0"
 
-    print(f"[*] Starting scrape for keyword: {keyword}")
+    print(f"[*] Starting scrape for keyword: {keyword} (Filter: Last 3 Days)")
 
     async with async_playwright() as p:
         # Launching Chromium in headless mode (change to headless=False to debug)
