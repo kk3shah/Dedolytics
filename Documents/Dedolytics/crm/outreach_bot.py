@@ -36,9 +36,9 @@ def get_email_template(title, company, name, job_description=""):
         try:
             model = genai.GenerativeModel("gemini-2.5-flash")
             salutation_instruction = (
-                f"The target is {name} at the company '{company}'."
+                f"The target is {name}, who is likely the Hiring Manager or Head of Data at the company '{company}'."
                 if name
-                else f"You do not know the hiring manager's name at the company '{company}'."
+                else f"You are emailing the Hiring Manager or Head of Data at the company '{company}'."
             )
 
             prompt = f"""
@@ -46,13 +46,13 @@ def get_email_template(title, company, name, job_description=""):
             Dedolytics specializes in Power BI, SQL, and Snowflake architecture, delivering enterprise-grade dashboards, 
             data pipelines, and data engineering solutions.
             
-            {salutation_instruction} They are currently hiring for the role of '{title}'.
+            {salutation_instruction} They are currently hiring for an individual contributor role: '{title}'.
             
-            Your goal is to pitch Dedolytics as an alternative or augmentation to hiring this full-time role internally. 
+            Your goal is to pitch Dedolytics as an alternative or augmentation to hiring this '{title}' full-time. 
             Highlight that using a specialized consulting strike-team avoids the timeline, overhead, and tax costs associated 
             with a standard full-time hire, while providing immediate, expert-level leverage for their data roadmap.
             Crucially, emphasize how Dedolytics brings significantly more robust value execution, speed, and cross-industry 
-            experience than a normal single candidate could provide.
+            experience than a normal single '{title}' candidate could provide.
             
             Job Description context (if any):
             {job_description[:1000]} # Trimmed to avoid excessive context sizes
