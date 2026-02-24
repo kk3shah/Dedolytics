@@ -49,9 +49,23 @@ def enrich_via_ddgs(company_name):
         results = DDGS().text(query, max_results=3)
         for res in results:
             title_text = res.get("title", "")
+            body_text = res.get("body", "")
 
             # We are looking for a standard LinkedIn profile title
             if (" - " in title_text or " – " in title_text) and "LinkedIn" in title_text:
+                # STRICT VALIDATION: Ensure the company is actually mentioned in this profile snippet.
+                # E.g., if scraping 'Roilogy', ensure 'roilogy' is in the title or body.
+                comp_lower = company_name.lower()
+                comp_first_word = comp_lower.split()[0].replace(",", "").replace(".", "")
+
+                # If even the first word of the company name isn't in the result, it's a false positive.
+                if (
+                    len(comp_first_word) > 2
+                    and comp_first_word not in title_text.lower()
+                    and comp_first_word not in body_text.lower()
+                ):
+                    continue
+
                 # E.g. "John Doe - Head of Data & AI at Stripe | LinkedIn"
                 doc_title = title_text.replace(" | LinkedIn", "")
                 parts = doc_title.replace(" – ", " - ").split(" - ")
@@ -60,10 +74,11 @@ def enrich_via_ddgs(company_name):
                 if len(parts) > 1:
                     manager_title = parts[1].strip()
 
-                # Sanity check
+                # Sanity check: Ensure we didn't accidentally extract a company as a name
                 lower_name = manager_name.lower()
                 if (
-                    company_name.lower() in lower_name
+                    comp_lower in lower_name
+                    or comp_first_word in lower_name
                     or "jobs" in lower_name
                     or "hiring" in lower_name
                     or "linkedin" in lower_name
