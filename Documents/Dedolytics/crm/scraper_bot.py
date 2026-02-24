@@ -1,4 +1,7 @@
 import asyncio
+import os
+import json
+import random
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 from bs4 import BeautifulSoup
@@ -6,51 +9,82 @@ import urllib.parse
 import time
 import schedule
 import db
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Search keywords for Dedolytics target audience
 KEYWORDS = ["Data Analyst", "Senior Data Analyst", "Analytics Engineer", "Data Engineer"]
 
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-async def enrich_contact(company_name, job_title):
+
+async def extract_context_with_gemini(description_text, company, title):
+    """Uses Gemini to extract the department and hiring manager from the raw JD."""
+    if not os.getenv("GEMINI_API_KEY"):
+        return "Analytics", None
+
+    model = genai.GenerativeModel("gemini-2.5-flash")
+
+    prompt = f"""
+    You are an expert at parsing B2B job descriptions.
+    I am providing you a Job Description for a "{title}" role at "{company}".
+    
+    Extract two things from the text:
+    1. "department": What department this role falls under (e.g., Marketing, Engineering, Product, Finance, Operations, Sales, IT). If not explicitly stated, guess based on context. Return ONLY the 1-2 word department name. Default to "Analytics" if totally unsure.
+    2. "hiring_manager": If the job description explicitly mentions who this role reports to BY NAME AND TITLE or JUST TITLE (e.g., "reports to Jane Doe, VP of Data" or "reporting to the Director of Demand Gen"), extract that exact title or name+title. If it is NOT explicitly mentioned or just says "reports to the manager", return null.
+    
+    Return the result EXCLUSIVELY as valid JSON. Do not include markdown blocks or any other text.
+    
+    Format:
+    {{
+      "department": "string",
+      "hiring_manager": "string or null"
+    }}
+    
+    Job Description:
+    {description_text}
     """
-    Placeholder for an enrichment service like Hunter.io or Apollo API.
-    Since raw job boards don't post hiring manager emails, a real production system
-    would take the `company_name` and `job_title` here, query Apollo/Hunter, and return
-    a real person's name and email.
-    """
-    # Returning None for now to ensure NO fake data is inserted into the DB during testing
-    return None
+
+    try:
+        response = model.generate_content(prompt)
+        # Clean potential markdown formatting
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        data = json.loads(raw_text)
+
+        dept = data.get("department", "Analytics")
+        mgr = data.get("hiring_manager")
+        return dept, mgr
+    except Exception as e:
+        print(f"      [-] Gemini parsing failed: {e}")
+        return "Analytics", None
 
 
 async def scrape_linkedin_jobs(keyword):
     """
     Scrapes the public (unlogged) LinkedIn Jobs portal for a given keyword.
-    Note: Public scraping is heavily rate-limited and layout changes often.
-    For high volume, a premium API or authenticated session is highly recommended.
+    Now performs a 'Deep Scrape' by visiting individual job pages.
     """
     url_keyword = urllib.parse.quote(keyword)
-    # Added f_TPR=r259200 to strictly filter for jobs posted in the last 3 days (259200 seconds)
+    # f_TPR=r259200 filters for jobs posted in the last 3 days
     url = f"https://www.linkedin.com/jobs/search?keywords={url_keyword}&location=United%20States&geoId=103644278&f_TPR=r259200&trk=public_jobs_jobs-search-bar_search-submit&position=1&pageNum=0"
 
     print(f"[*] Starting scrape for keyword: {keyword} (Filter: Last 3 Days)")
 
     async with async_playwright() as p:
-        # Launching Chromium in headless mode (change to headless=False to debug)
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-
-        # Apply stealth to evade basic bot detection
         await stealth_async(page)
 
         try:
             await page.goto(url, wait_until="domcontentloaded")
-            # Wait for job cards to load
             await page.wait_for_selector("ul.jobs-search__results-list", timeout=10000)
 
-            # Scroll down to load more jobs (simulating user behavior)
+            # Scroll down to load more jobs
             for _ in range(3):
                 await page.evaluate("window.scrollBy(0, 1000)")
                 await asyncio.sleep(1)
@@ -58,11 +92,17 @@ async def scrape_linkedin_jobs(keyword):
             html = await page.content()
             soup = BeautifulSoup(html, "html.parser")
 
-            # Parse the job listings
             job_cards = soup.select("ul.jobs-search__results-list > li")
             print(f"[*] Found {len(job_cards)} job listings for '{keyword}'")
 
+            # To avoid an instant IP ban, we will only deep-scrape the first 5 new jobs per keyword per run
+            scrape_count = 0
+
             for card in job_cards:
+                if scrape_count >= 5:
+                    print("      [!] Reached deep-scrape limit (5) for this keyword to avoid bans. Moving on.")
+                    break
+
                 try:
                     title_elem = card.find("h3", class_="base-search-card__title")
                     company_elem = card.find("h4", class_="base-search-card__subtitle")
@@ -78,34 +118,64 @@ async def scrape_linkedin_jobs(keyword):
                     # Ensure we don't scrape our current clients/restricted targets
                     BLACKLISTED_COMPANIES = ["petvalu", "retailogists"]
                     if any(blacklisted in company.lower() for blacklisted in BLACKLISTED_COMPANIES):
-                        print(f"[*] Skipping blacklisted company: {company}")
                         continue
 
                     location = location_elem.text.strip() if location_elem else "Unknown"
-                    link = link_elem.get("href", "").split("?")[0]  # Remove tracking params
+                    link = link_elem.get("href", "").split("?")[0]
 
-                    # Store in Database
-                    # `db.upsert_job` returns the ID if new, or None if it existed
+                    # 1. Insert placeholder to see if it's NEW
                     job_id = db.upsert_job(title, company, link, description="", location=location)
 
                     if job_id:
                         print(f"[+] NEW JOB: {title} at {company}")
+                        scrape_count += 1
 
-                        # Click the card to load the description in the side pane (or a new page depending on layout)
+                        # 2. Deep Scrape the Job Description
                         try:
-                            # In the standard jobs search, the description is sometimes inline or loaded via AJax
-                            # We'll just grab the innerText of the card or the next element if it has a snippet
-                            # For a robust scraper, this usually requires clicking the link and navigating,
-                            # but to avoid being banned quickly, we'll try to extract what's on the search page first.
+                            jd_page = await context.new_page()
+                            await stealth_async(jd_page)
 
-                            # Note: LinkedIn public search hides the full description behind the link.
-                            # Since we are scraping public pages rapidly, doing a `page.goto(link)` for every single job
-                            # will trigger an IP ban almost immediately.
-                            # We will rely on Gemini extracting maximum value from the specific Title and Company.
-                            description_text = "Job Description not extracted during rapid scrape to avoid IP bans. Rely on Title and Company context."
-                            db.update_job_description(job_id, description_text)
+                            # Add random delay to prevent rate limit
+                            delay = random.uniform(2.0, 5.0)
+                            print(f"      [~] Waiting {delay:.1f}s before fetching description...")
+                            await asyncio.sleep(delay)
+
+                            await jd_page.goto(link, wait_until="domcontentloaded")
+                            await jd_page.wait_for_selector(
+                                ".description__text, .show-more-less-html__markup", timeout=8000
+                            )
+
+                            jd_html = await jd_page.content()
+                            jd_soup = BeautifulSoup(jd_html, "html.parser")
+
+                            desc_elem = jd_soup.select_one(".description__text, .show-more-less-html__markup")
+                            description_text = desc_elem.text.strip() if desc_elem else "Failed to parse JD HTML."
+
+                            # Clean up extremely long JDs
+                            if len(description_text) > 8000:
+                                description_text = description_text[:8000]
+
+                            await jd_page.close()
+
+                            # 3. Parse with Gemini
+                            print("      [~] Handing JD to Gemini for Department & Manager extraction...")
+                            dept, mgr = await extract_context_with_gemini(description_text, company, title)
+
+                            print(f"      [+] Parsed Context -> Dept: {dept} | Mgr: {mgr}")
+
+                            # 4. Final DB Update (db.py needs an update_job_context function, or we use a raw inline query)
+                            conn = db.get_connection()
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE jobs SET description = ?, department = ?, hiring_manager = ? WHERE id = ?",
+                                (description_text, dept, mgr, job_id),
+                            )
+                            conn.commit()
+                            conn.close()
+
                         except Exception as e:
-                            print(f"[-] Failed to update description: {e}")
+                            print(f"      [-] Failed to deep-scrape description: {e}")
+
                 except Exception as e:
                     print(f"[-] Error parsing job card: {e}")
 
@@ -119,25 +189,14 @@ def run_scraper_cycle():
     """Runs the scraper for all keywords sequentially."""
     print(f"\n--- Starting Scraper Cycle at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
 
-    # Initialize DB (if not exists)
     db.init_db()
 
     for kw in KEYWORDS:
-        # Run the async scraper via asyncio
         asyncio.run(scrape_linkedin_jobs(kw))
-
-        # Avoid hammering the server too quickly
         time.sleep(5)
 
     print(f"--- Finished Scraper Cycle at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
 
 
 if __name__ == "__main__":
-    # If run manually, run once
     run_scraper_cycle()
-
-    # To run this 24/7 without cron, uncomment below and keep process alive:
-    # schedule.every(4).hours.do(run_scraper_cycle)
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(60)

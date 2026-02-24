@@ -1,14 +1,11 @@
 import time
 import db
 import random
+import re
 from ddgs import DDGS
 
 
 def get_company_domain(company_name):
-    """
-    Cleans up a company name to guess its primary domain.
-    E.g., "Stripe, Inc." -> "stripe.com"
-    """
     clean = company_name.lower()
     for drop in [" inc", " inc.", " llc", " corp", " ltd", " group", " solutions", ",", ".", " & co"]:
         clean = clean.replace(drop, "")
@@ -16,34 +13,79 @@ def get_company_domain(company_name):
     return domain
 
 
-def generate_email_permutations(name, company_name):
-    """
-    Given a person's name and a company, generates the most common corporate email formats.
-    """
-    if not name or len(name.split()) < 2:
+def extract_email_from_text(text, domain):
+    """Uses regex to find email addresses in a block of text."""
+    if not text:
         return None
 
-    parts = name.lower().split()
-    first = parts[0]
-    last = parts[-1]
+    # Generic email regex
+    email_pattern = r"[\w\.-]+@[\w\.-]+\.\w+"
+    matches = re.findall(email_pattern, text)
 
+    # Prioritize emails containing the company domain, else take the first found
+    best_match = None
+    for match in matches:
+        match_lower = match.lower()
+        if domain in match_lower and not any(x in match_lower for x in ["example", "email", "info", "contact"]):
+            return match_lower
+        elif best_match is None and not any(x in match_lower for x in ["example", "email", "info"]):
+            best_match = match_lower
+
+    return best_match
+
+
+def hunt_actual_email(name, company_name):
+    """Searches the open web for the exact person's email address."""
     domain = get_company_domain(company_name)
-    best_guess = f"{first}.{last}@{domain}"
-    return best_guess
+    query = f'"{name}" "{company_name}" email "@"'
+    print(f"      [Hunt] Searching Web for Email: {query}")
+
+    try:
+        results = DDGS().text(query, max_results=5)
+
+        # Look through all snippets
+        for res in results:
+            title_text = res.get("title", "")
+            body_text = res.get("body", "")
+
+            # Check Title
+            found = extract_email_from_text(title_text, domain)
+            if found:
+                return found
+
+            # Check Body
+            found = extract_email_from_text(body_text, domain)
+            if found:
+                return found
+
+    except Exception as e:
+        print(f"      [-] DDGS email hunt failed: {e}")
+
+    return None
 
 
-def enrich_via_ddgs(company_name):
-    """
-    Uses DuckDuckGo Search API to find the LinkedIn profile of the Head of Data.
-    Entirely reverse-engineers the B2B enrichment process for free.
-    """
+def find_manager_profile(company_name, job_title, department, db_manager):
+    """Finds the manager's name dynamically based on job properties."""
+    if db_manager and db_manager.lower() != "null":
+        # JD explicitly stated the manager
+        return db_manager, "Hiring Manager"
+
+    # Build dynamic search keywords based on the scraped job title
+    title_kws = "Data"
+    if "analyst" in job_title.lower() or "analytics" in job_title.lower():
+        title_kws = '"Analytics" OR "Data"'
+    elif "engineer" in job_title.lower():
+        title_kws = '"Engineering" OR "Data"'
+
+    dept_kw = f'"{department}"' if department else ""
+
     query = (
-        f'site:linkedin.com/in/ "{company_name}" "Head of Data" OR "Director of Analytics" OR "Data Analytics Manager"'
+        f'site:linkedin.com/in/ "{company_name}" {dept_kw} ({title_kws}) ("Manager" OR "Director" OR "Head" OR "VP")'
     )
-    print(f"      [Enrich] Querying DDGS: {query}")
+    print(f"      [Enrich] Discovering Manager: {query}")
 
     manager_name = None
-    manager_title = "Data Leader"
+    manager_title = "Data/Analytics Leader"
 
     try:
         results = DDGS().text(query, max_results=3)
@@ -51,14 +93,10 @@ def enrich_via_ddgs(company_name):
             title_text = res.get("title", "")
             body_text = res.get("body", "")
 
-            # We are looking for a standard LinkedIn profile title
             if (" - " in title_text or " – " in title_text) and "LinkedIn" in title_text:
-                # STRICT VALIDATION: Ensure the company is actually mentioned in this profile snippet.
-                # E.g., if scraping 'Roilogy', ensure 'roilogy' is in the title or body.
                 comp_lower = company_name.lower()
                 comp_first_word = comp_lower.split()[0].replace(",", "").replace(".", "")
 
-                # If even the first word of the company name isn't in the result, it's a false positive.
                 if (
                     len(comp_first_word) > 2
                     and comp_first_word not in title_text.lower()
@@ -66,15 +104,16 @@ def enrich_via_ddgs(company_name):
                 ):
                     continue
 
-                # E.g. "John Doe - Head of Data & AI at Stripe | LinkedIn"
                 doc_title = title_text.replace(" | LinkedIn", "")
                 parts = doc_title.replace(" – ", " - ").split(" - ")
 
-                manager_name = parts[0].strip()
+                # Raw name might include "(Head of Data)" or ", Ph.D"
+                manager_name_raw = parts[0].strip()
+                manager_name = re.split(r"[\(\|\,]", manager_name_raw)[0].strip()
+
                 if len(parts) > 1:
                     manager_title = parts[1].strip()
 
-                # Sanity check: Ensure we didn't accidentally extract a company as a name
                 lower_name = manager_name.lower()
                 if (
                     comp_lower in lower_name
@@ -86,28 +125,34 @@ def enrich_via_ddgs(company_name):
                     manager_name = None
                     continue
                 else:
-                    break  # Found a valid person
+                    break
 
     except Exception as e:
         print(f"      [-] DDGS search failed: {e}")
 
-    if manager_name:
-        email = generate_email_permutations(manager_name, company_name)
-        return manager_name, email, manager_title
+    return manager_name, manager_title
 
-    return None, None, None
+
+def generate_fallback_email(name, company_name):
+    """If true scraping fails, fallback to generating the most likely format."""
+    if not name or len(name.split()) < 2:
+        return None
+    parts = name.lower().split()
+    first = parts[0]
+    last = parts[-1]
+    domain = get_company_domain(company_name)
+    return f"{first}.{last}@{domain}"
 
 
 def run_enrichment_cycle():
-    """Reads unenriched jobs, scrapes web for managers, and updates the DB."""
-    print(f"\n--- Starting B2B Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    """Reads unenriched jobs, dynamically hunts managers & exact emails, updates DB."""
+    print(f"\n--- Starting B2B Dynamic Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
 
-    # Query all 'new' jobs that don't have a contact yet
     conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT j.id, j.company 
+        SELECT j.id, j.title, j.company, j.department, j.hiring_manager
         FROM jobs j
         LEFT JOIN contacts c ON j.id = c.job_id
         WHERE j.status = 'new' AND c.id IS NULL
@@ -116,33 +161,41 @@ def run_enrichment_cycle():
     unenriched_jobs = cursor.fetchall()
     conn.close()
 
-    print(f"[*] Found {len(unenriched_jobs)} jobs needing B2B contact enrichment.")
+    print(f"[*] Found {len(unenriched_jobs)} jobs needing contextual enrichment.")
 
     success_count = 0
 
-    for job_id, company in unenriched_jobs:
-        print(f"\n[*] Enriching: {company}")
+    for job_id, title, company, dept, hiring_mgr in unenriched_jobs:
+        print(f"\n[*] Context: {title} @ {company} (Dept: {dept})")
 
-        # 1. Search Web via DDGS
-        name, email, title = enrich_via_ddgs(company)
+        # 1. Dynamically Find Manager
+        name, mgr_title = find_manager_profile(company, title, dept, hiring_mgr)
 
-        if name and email:
-            print(f"      [+] Found Contact: {name} ({title}) -> {email}")
+        if name:
+            print(f"      [+] Found Manager: {name} ({mgr_title})")
+            time.sleep(random.uniform(1.5, 3.0))
 
-            # 2. Save to DB
-            db.add_contact(job_id, name, email, title)
+            # 2. Hunt for Actual Email
+            email = hunt_actual_email(name, company)
+            if email:
+                print(f"      [+] Extracted Real Email: {email}")
+            else:
+                email = generate_fallback_email(name, company)
+                print(f"      [~] Web scraping failed. Using format: {email}")
+
+            # 3. Save to DB
+            db.add_contact(job_id, name, email, mgr_title)
             success_count += 1
 
-            # Flag job as enriched
             conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute("UPDATE jobs SET status = 'enriched' WHERE id = ?", (job_id,))
             conn.commit()
             conn.close()
         else:
-            print(f"      [-] Could not reliably enrich {company}.")
+            print(f"      [-] Could not identify a manager profile.")
 
-        time.sleep(random.uniform(1.5, 3.0))  # Be polite to DDGS API
+        time.sleep(random.uniform(1.5, 3.0))
 
     print(f"\n[*] Enrichment Complete. Successfully enriched {success_count} contacts.")
     print(f"--- Finished Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")

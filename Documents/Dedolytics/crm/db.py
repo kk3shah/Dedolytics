@@ -26,10 +26,12 @@ def init_db():
         title TEXT NOT NULL,
         company TEXT NOT NULL,
         description TEXT,
+        department TEXT,
+        hiring_manager TEXT,
         link TEXT UNIQUE NOT NULL,
         location TEXT,
         date_found DATETIME DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'new' -- 'new', 'emailed', 'replied', 'ignored'
+        status TEXT DEFAULT 'new' -- 'new', 'enriched', 'emailed', 'replied', 'ignored'
     )
     """
     )
@@ -72,17 +74,17 @@ def init_db():
     print(f"Database initialized at {DB_PATH}")
 
 
-def upsert_job(title, company, link, description="", location=""):
+def upsert_job(title, company, link, description="", location="", department=None, hiring_manager=None):
     """Inserts a new job. Returns job_id if NEW, None if it already exists."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
-        INSERT INTO jobs (title, company, description, link, location)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO jobs (title, company, description, department, hiring_manager, link, location)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-            (title, company, description, link, location),
+            (title, company, description, department, hiring_manager, link, location),
         )
         job_id = cursor.lastrowid
         conn.commit()
