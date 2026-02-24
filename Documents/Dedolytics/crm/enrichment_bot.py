@@ -1,8 +1,7 @@
-import os
 import time
-import requests
 import db
-from dotenv import load_dotenv
+import random
+from ddgs import DDGS
 
 
 def get_company_domain(company_name):
@@ -17,67 +16,76 @@ def get_company_domain(company_name):
     return domain
 
 
-def enrich_via_hunter_api(company_name):
+def generate_email_permutations(name, company_name):
     """
-    Uses the Hunter.io Domain Search API to find the best contact for outreach.
-    Requires HUNTER_API_KEY in the .env file.
+    Given a person's name and a company, generates the most common corporate email formats.
     """
-    load_dotenv()
-    api_key = os.getenv("HUNTER_API_KEY")
+    if not name or len(name.split()) < 2:
+        return None
 
-    if not api_key:
-        print("      [-] Warning: HUNTER_API_KEY not found in .env. Enrichment will fail.")
-        return None, None
+    parts = name.lower().split()
+    first = parts[0]
+    last = parts[-1]
 
     domain = get_company_domain(company_name)
-    url = f"https://api.hunter.io/v2/domain-search?domain={domain}&department=it,executive&api_key={api_key}"
+    best_guess = f"{first}.{last}@{domain}"
+    return best_guess
 
-    print(f"      [Enrich] Querying Hunter API for: {domain}")
+
+def enrich_via_ddgs(company_name):
+    """
+    Uses DuckDuckGo Search API to find the LinkedIn profile of the Head of Data.
+    Entirely reverse-engineers the B2B enrichment process for free.
+    """
+    query = (
+        f'site:linkedin.com/in/ "{company_name}" "Head of Data" OR "Director of Analytics" OR "Data Analytics Manager"'
+    )
+    print(f"      [Enrich] Querying DDGS: {query}")
+
+    manager_name = None
+    manager_title = "Data Leader"
 
     try:
-        response = requests.get(url, timeout=10)
+        results = DDGS().text(query, max_results=3)
+        for res in results:
+            title_text = res.get("title", "")
 
-        if response.status_code == 200:
-            data = response.json()
-            emails = data.get("data", {}).get("emails", [])
+            # We are looking for a standard LinkedIn profile title
+            if (" - " in title_text or " – " in title_text) and "LinkedIn" in title_text:
+                # E.g. "John Doe - Head of Data & AI at Stripe | LinkedIn"
+                doc_title = title_text.replace(" | LinkedIn", "")
+                parts = doc_title.replace(" – ", " - ").split(" - ")
 
-            if emails:
-                # Prioritize anyone with 'Data', 'Analytics', 'Head', 'Director', or 'VP' in their title
-                best_contact = emails[0]  # Default to the first found
-                for e in emails:
-                    title = str(e.get("position", "")).lower()
-                    if any(kw in title for kw in ["data", "analytic", "director", "head", "vp", "chief"]):
-                        best_contact = e
-                        break
+                manager_name = parts[0].strip()
+                if len(parts) > 1:
+                    manager_title = parts[1].strip()
 
-                name = f"{best_contact.get('first_name', '')} {best_contact.get('last_name', '')}".strip()
-                email = best_contact.get("value")
-                title = best_contact.get("position", "Data Leader")
-
-                # Fallback if name is empty
-                if not name:
-                    name = "Data Leader"
-
-                return name, email, title
-            else:
-                print(f"      [-] No emails found for {domain} on Hunter.io")
-        else:
-            print(f"      [-] API Error {response.status_code}: {response.text}")
+                # Sanity check
+                lower_name = manager_name.lower()
+                if (
+                    company_name.lower() in lower_name
+                    or "jobs" in lower_name
+                    or "hiring" in lower_name
+                    or "linkedin" in lower_name
+                ):
+                    manager_name = None
+                    continue
+                else:
+                    break  # Found a valid person
 
     except Exception as e:
-        print(f"      [-] Enrichment request failed: {e}")
+        print(f"      [-] DDGS search failed: {e}")
+
+    if manager_name:
+        email = generate_email_permutations(manager_name, company_name)
+        return manager_name, email, manager_title
 
     return None, None, None
 
 
 def run_enrichment_cycle():
-    """Reads unenriched jobs, queries Hunter API, and updates the DB."""
+    """Reads unenriched jobs, scrapes web for managers, and updates the DB."""
     print(f"\n--- Starting B2B Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
-
-    load_dotenv()
-    if not os.getenv("HUNTER_API_KEY"):
-        print("\n[CRITICAL ERROR] You must add HUNTER_API_KEY to your crm/.env file before running Enrichment.\n")
-        return
 
     # Query all 'new' jobs that don't have a contact yet
     conn = db.get_connection()
@@ -100,8 +108,8 @@ def run_enrichment_cycle():
     for job_id, company in unenriched_jobs:
         print(f"\n[*] Enriching: {company}")
 
-        # 1. Hit Hunter API
-        name, email, title = enrich_via_hunter_api(company)
+        # 1. Search Web via DDGS
+        name, email, title = enrich_via_ddgs(company)
 
         if name and email:
             print(f"      [+] Found Contact: {name} ({title}) -> {email}")
@@ -119,7 +127,7 @@ def run_enrichment_cycle():
         else:
             print(f"      [-] Could not reliably enrich {company}.")
 
-        time.sleep(1)  # Be polite to API rate limits
+        time.sleep(random.uniform(1.5, 3.0))  # Be polite to DDGS API
 
     print(f"\n[*] Enrichment Complete. Successfully enriched {success_count} contacts.")
     print(f"--- Finished Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
