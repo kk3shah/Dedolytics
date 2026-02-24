@@ -1,104 +1,87 @@
-import asyncio
-from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
-from bs4 import BeautifulSoup
-import urllib.parse
+import os
 import time
+import requests
 import db
-import random
+from dotenv import load_dotenv
 
 
-async def search_duckduckgo_for_manager(company_name):
+def get_company_domain(company_name):
     """
-    Searches DuckDuckGo for the Head of Data / Director of Analytics at a specific company.
-    DuckDuckGo is used here because it has fewer aggressive bot protections than Google.
+    Cleans up a company name to guess its primary domain.
+    E.g., "Stripe, Inc." -> "stripe.com"
     """
-    query = f'"{company_name}" ("Head of Data" OR "Director of Analytics" OR "VP of Data" OR "Hiring Manager") LinkedIn'
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-
-    print(f"      [Search] Querying: {query}")
-
-    manager_name = None
-    manager_title = "Data Leader"
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        page = await context.new_page()
-        await stealth_async(page)
-
-        try:
-            await page.goto(url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(1.5, 3.0))  # Be polite to DDG
-
-            html = await page.content()
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Parse DDG HTML results
-            results = soup.find_all("a", class_="result__snippet")
-            titles = soup.find_all("h2", class_="result__title")
-
-            if titles:
-                # We just take the absolute first result as the most likely candidate
-                first_title_text = titles[0].text.strip()
-
-                # LinkedIn titles usually look like: "John Doe - Head of Data - Stripe | LinkedIn"
-                if "-" in first_title_text:
-                    parts = first_title_text.split("-")
-                    manager_name = parts[0].strip()
-                    if len(parts) > 1:
-                        manager_title = parts[1].replace(" | LinkedIn", "").strip()
-
-                # Basic sanity check to ensure we didn't just grab a company page
-                if manager_name and (
-                    company_name.lower() in manager_name.lower() or "linkedin" in manager_name.lower()
-                ):
-                    manager_name = None  # False positive
-
-        except Exception as e:
-            print(f"      [-] Search failed for {company_name}: {e}")
-        finally:
-            await browser.close()
-
-    return manager_name, manager_title
+    clean = company_name.lower()
+    for drop in [" inc", " inc.", " llc", " corp", " ltd", " group", " solutions", ",", ".", " & co"]:
+        clean = clean.replace(drop, "")
+    domain = clean.replace(" ", "") + ".com"
+    return domain
 
 
-def generate_email_permutations(name, company_name):
+def enrich_via_hunter_api(company_name):
     """
-    Given a person's name and a company, generates the most common corporate email formats.
-    e.g. John Doe at Stripe -> jdoe@stripe.com, john.doe@stripe.com, john@stripe.com
+    Uses the Hunter.io Domain Search API to find the best contact for outreach.
+    Requires HUNTER_API_KEY in the .env file.
     """
-    if not name or len(name.split()) < 2:
-        return None
+    load_dotenv()
+    api_key = os.getenv("HUNTER_API_KEY")
 
-    parts = name.lower().split()
-    first = parts[0]
-    last = parts[-1]
+    if not api_key:
+        print("      [-] Warning: HUNTER_API_KEY not found in .env. Enrichment will fail.")
+        return None, None
 
-    # Strip common corporate suffixes from company name to guess the domain
-    clean_company = company_name.lower()
-    for suffix in [" inc", " llc", " corp", " ltd", " group", " solutions", ",", "."]:
-        clean_company = clean_company.replace(suffix, "")
+    domain = get_company_domain(company_name)
+    url = f"https://api.hunter.io/v2/domain-search?domain={domain}&department=it,executive&api_key={api_key}"
 
-    domain = clean_company.replace(" ", "") + ".com"
+    print(f"      [Enrich] Querying Hunter API for: {domain}")
 
-    # We will just return the most common B2B format (first.last@domain.com) for simplicity
-    # A robust system would ping these against an SMTP verifier
-    best_guess = f"{first}.{last}@{domain}"
-    return best_guess
+    try:
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            emails = data.get("data", {}).get("emails", [])
+
+            if emails:
+                # Prioritize anyone with 'Data', 'Analytics', 'Head', 'Director', or 'VP' in their title
+                best_contact = emails[0]  # Default to the first found
+                for e in emails:
+                    title = str(e.get("position", "")).lower()
+                    if any(kw in title for kw in ["data", "analytic", "director", "head", "vp", "chief"]):
+                        best_contact = e
+                        break
+
+                name = f"{best_contact.get('first_name', '')} {best_contact.get('last_name', '')}".strip()
+                email = best_contact.get("value")
+                title = best_contact.get("position", "Data Leader")
+
+                # Fallback if name is empty
+                if not name:
+                    name = "Data Leader"
+
+                return name, email, title
+            else:
+                print(f"      [-] No emails found for {domain} on Hunter.io")
+        else:
+            print(f"      [-] API Error {response.status_code}: {response.text}")
+
+    except Exception as e:
+        print(f"      [-] Enrichment request failed: {e}")
+
+    return None, None, None
 
 
 def run_enrichment_cycle():
-    """Reads unenriched jobs, searches for managers, and updates the DB."""
-    print(f"\n--- Starting Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    """Reads unenriched jobs, queries Hunter API, and updates the DB."""
+    print(f"\n--- Starting B2B Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
+
+    load_dotenv()
+    if not os.getenv("HUNTER_API_KEY"):
+        print("\n[CRITICAL ERROR] You must add HUNTER_API_KEY to your crm/.env file before running Enrichment.\n")
+        return
 
     # Query all 'new' jobs that don't have a contact yet
     conn = db.get_connection()
     cursor = conn.cursor()
-    # We check if a contact exists for the job. If not, we enrich.
     cursor.execute(
         """
         SELECT j.id, j.company 
@@ -110,35 +93,33 @@ def run_enrichment_cycle():
     unenriched_jobs = cursor.fetchall()
     conn.close()
 
-    print(f"[*] Found {len(unenriched_jobs)} jobs needing contact enrichment.")
+    print(f"[*] Found {len(unenriched_jobs)} jobs needing B2B contact enrichment.")
 
     success_count = 0
 
     for job_id, company in unenriched_jobs:
         print(f"\n[*] Enriching: {company}")
 
-        # 1. Search for Manager
-        name, title = asyncio.run(search_duckduckgo_for_manager(company))
+        # 1. Hit Hunter API
+        name, email, title = enrich_via_hunter_api(company)
 
-        if name:
-            print(f"      [+] Found Manager: {name} ({title})")
-            # 2. Guess Email
-            email = generate_email_permutations(name, company)
-            print(f"      [+] Generated Email: {email}")
+        if name and email:
+            print(f"      [+] Found Contact: {name} ({title}) -> {email}")
 
-            # 3. Save to DB
+            # 2. Save to DB
             db.add_contact(job_id, name, email, title)
             success_count += 1
 
-            # Flag job as enriched so outreach picks it up
+            # Flag job as enriched
             conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute("UPDATE jobs SET status = 'enriched' WHERE id = ?", (job_id,))
             conn.commit()
             conn.close()
-
         else:
-            print(f"      [-] Could not definitively find a manager for {company}.")
+            print(f"      [-] Could not reliably enrich {company}.")
+
+        time.sleep(1)  # Be polite to API rate limits
 
     print(f"\n[*] Enrichment Complete. Successfully enriched {success_count} contacts.")
     print(f"--- Finished Enrichment Engine at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
