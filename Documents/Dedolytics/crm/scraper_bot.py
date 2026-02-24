@@ -90,17 +90,22 @@ async def scrape_linkedin_jobs(keyword):
 
                     if job_id:
                         print(f"[+] NEW JOB: {title} at {company}")
-                        # If the job is new, try to find a contact
-                        contact = await enrich_contact(company, title)
-                        if contact:
-                            db.add_contact(
-                                job_id,
-                                contact["name"],
-                                contact["email"],
-                                contact["title"],
-                                contact["phone"],
-                                contact["linkedin"],
-                            )
+
+                        # Click the card to load the description in the side pane (or a new page depending on layout)
+                        try:
+                            # In the standard jobs search, the description is sometimes inline or loaded via AJax
+                            # We'll just grab the innerText of the card or the next element if it has a snippet
+                            # For a robust scraper, this usually requires clicking the link and navigating,
+                            # but to avoid being banned quickly, we'll try to extract what's on the search page first.
+
+                            # Note: LinkedIn public search hides the full description behind the link.
+                            # Since we are scraping public pages rapidly, doing a `page.goto(link)` for every single job
+                            # will trigger an IP ban almost immediately.
+                            # We will rely on Gemini extracting maximum value from the specific Title and Company.
+                            description_text = "Job Description not extracted during rapid scrape to avoid IP bans. Rely on Title and Company context."
+                            db.update_job_description(job_id, description_text)
+                        except Exception as e:
+                            print(f"[-] Failed to update description: {e}")
                 except Exception as e:
                     print(f"[-] Error parsing job card: {e}")
 

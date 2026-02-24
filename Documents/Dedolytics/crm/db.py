@@ -73,7 +73,7 @@ def init_db():
 
 
 def upsert_job(title, company, link, description="", location=""):
-    """Inserts a new job or ignores if the link already exists."""
+    """Inserts a new job. Returns job_id if NEW, None if it already exists."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -88,12 +88,19 @@ def upsert_job(title, company, link, description="", location=""):
         conn.commit()
         return job_id
     except sqlite3.IntegrityError:
-        # Link already exists
-        cursor.execute("SELECT id FROM jobs WHERE link = ?", (link,))
-        row = cursor.fetchone()
-        return row[0] if row else None
+        # Link already exists, skip
+        return None
     finally:
         conn.close()
+
+
+def update_job_description(job_id, description):
+    """Updates the job description later."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE jobs SET description = ? WHERE id = ?", (description, job_id))
+    conn.commit()
+    conn.close()
 
 
 def add_contact(job_id, name, email, title, phone="", linkedin_url=""):
@@ -117,15 +124,15 @@ def add_contact(job_id, name, email, title, phone="", linkedin_url=""):
 
 
 def get_pending_outreach_jobs():
-    """Gets jobs that haven't been emailed yet."""
+    """Gets jobs that have been enriched with a contact and are ready for outreach."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-    SELECT j.id, j.title, j.company, c.id, c.name, c.email 
+    SELECT j.id, j.title, j.company, c.id, c.name, c.email, j.description 
     FROM jobs j
     JOIN contacts c ON j.id = c.job_id
-    WHERE j.status = 'new'
+    WHERE j.status = 'enriched' AND c.email IS NOT NULL
     """
     )
     rows = cursor.fetchall()
