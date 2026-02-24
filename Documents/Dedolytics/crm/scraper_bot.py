@@ -8,7 +8,7 @@ import schedule
 import db
 
 # Search keywords for Dedolytics target audience
-KEYWORDS = ["Director of Analytics", "CTO", "Analytics Manager", "Analytics Lead", "Head of Data"]
+KEYWORDS = ["Data Analyst", "Senior Data Analyst", "Analytics Engineer", "Data Engineer"]
 
 
 async def enrich_contact(company_name, job_title):
