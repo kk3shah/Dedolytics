@@ -1,18 +1,15 @@
-import os
-import time
+"""
+Legacy entry point — now delegates to daily_pipeline.py.
 
-print("\n==================================")
-print("  DEDOLYTICS SMB B2B PIPELINE")
-print("==================================\n")
+Usage:
+  python run_smb_pipeline.py              # Full run
+  python run_smb_pipeline.py --dry-run    # Simulate (no emails sent)
+"""
+import sys
 
-print("\n--- STEP 1: Scrape New SMB Leads ---")
-print("[SKIPPED] Database already saturated with 170+ manual and scraped leads.")
-# os.system("python smb_scraper.py")
+print("\n[*] Redirecting to daily_pipeline.py (new orchestrator)...\n")
 
-print("\n--- STEP 2: Generate AI Infographics ---")
-os.system("python infographic_bot.py")
+from daily_pipeline import run_pipeline
 
-print("\n--- STEP 3: Dispatch SMB Outreach (With Idempotency) ---")
-os.system("python smb_outreach.py")
-
-print("\n--- ENTIRE SMB PIPELINE COMPLETE ---")
+dry_run = "--dry-run" in sys.argv
+run_pipeline(dry_run=dry_run)

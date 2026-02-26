@@ -77,11 +77,18 @@ def init_db():
         company_name TEXT NOT NULL,
         category TEXT,
         email TEXT UNIQUE NOT NULL,
+        phone TEXT,
+        address TEXT,
         website TEXT,
         infographic_html TEXT,
         status TEXT DEFAULT 'new', -- 'new', 'generated', 'emailed'
         last_emailed_date DATE,
-        email_sent TEXT DEFAULT 'no'
+        email_sent TEXT DEFAULT 'no',
+        followup_count INTEGER DEFAULT 0,
+        next_followup_date DATE,
+        date_scraped DATE,
+        source TEXT DEFAULT 'places',
+        last_error TEXT
     )
     """
     )
@@ -191,17 +198,18 @@ def log_email(job_id, contact_id, email_sent_from, template_used, subject):
 # --- SMB Leads Pipeline Functions ---
 
 
-def add_smb_lead(company_name, category, email, website=""):
+def add_smb_lead(company_name, category, email, website="", phone="", address="", source="places"):
     """Inserts a new SMB lead. Ignores if email already exists."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        today = datetime.now().strftime("%Y-%m-%d")
         cursor.execute(
             """
-        INSERT INTO smb_leads (company_name, category, email, website)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO smb_leads (company_name, category, email, website, phone, address, source, date_scraped)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-            (company_name, category, email, website),
+            (company_name, category, email, website, phone, address, source, today),
         )
         lead_id = cursor.lastrowid
         conn.commit()
@@ -251,14 +259,90 @@ def get_ready_smb_emails():
 
 
 def mark_smb_emailed(lead_id):
-    """Marks an SMB lead as emailed permanently by setting email_sent = 'yes'."""
+    """Marks an SMB lead as emailed permanently by setting email_sent = 'yes' and scheduling first follow-up."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    todayStr = datetime.now().strftime("%Y-%m-%d")
+    # Schedule first follow-up for 7 days from now
+    from datetime import timedelta
+
+    followup_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    cursor.execute(
+        "UPDATE smb_leads SET status = 'emailed', last_emailed_date = ?, email_sent = 'yes', next_followup_date = ? WHERE id = ?",
+        (todayStr, followup_date, lead_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_existing_emails():
+    """Returns a set of all emails currently in the database for fast dedup."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM smb_leads")
+    emails = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return emails
+
+
+def get_today_new_leads_count():
+    """Returns count of leads scraped today."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    todayStr = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM smb_leads WHERE date_scraped = ?", (todayStr,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_followup_leads():
+    """Gets leads that are due for a follow-up email (emailed, <3 follow-ups, due date reached)."""
     conn = get_connection()
     cursor = conn.cursor()
     todayStr = datetime.now().strftime("%Y-%m-%d")
     cursor.execute(
-        "UPDATE smb_leads SET status = 'emailed', last_emailed_date = ?, email_sent = 'yes' WHERE id = ?",
-        (todayStr, lead_id),
+        """
+        SELECT id, company_name, category, email, followup_count
+        FROM smb_leads
+        WHERE email_sent = 'yes'
+        AND followup_count < 3
+        AND next_followup_date IS NOT NULL
+        AND next_followup_date <= ?
+        """,
+        (todayStr,),
     )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_followup_sent(lead_id):
+    """Increments followup_count and schedules next follow-up in 7 days."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    from datetime import timedelta
+
+    next_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    cursor.execute(
+        """
+        UPDATE smb_leads
+        SET followup_count = followup_count + 1,
+            next_followup_date = ?,
+            last_emailed_date = ?
+        WHERE id = ?
+        """,
+        (next_date, datetime.now().strftime("%Y-%m-%d"), lead_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_lead_error(lead_id, error_msg):
+    """Stores the last error for a lead (for debugging)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE smb_leads SET last_error = ? WHERE id = ?", (str(error_msg)[:500], lead_id))
     conn.commit()
     conn.close()
 
