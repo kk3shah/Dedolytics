@@ -1,57 +1,78 @@
-# Dedolytics CRM System
+# Dedolytics B2B Outreach Pipeline
 
-This folder contains the dual-bot system consisting of:
-1. **The Scraper Bot (`scraper_bot.py`):** Scrapes LinkedIn public jobs using Playwright Stealth and stores them in SQLite.
-2. **The Outreach Bot (`outreach_bot.py`):** Reads untouched contacts from SQLite, renders customized email templates based on job titles, and emails them rotating between 3 Google Workspace accounts.
+A hyper-personalized, fully automated AI sales outreach engine designed for Dedolytics. This Python pipeline scrapes targeted SMB local leads, uses the Google Gemini LLM to construct bespoke HTML data-consulting infographics for their specific industry, and cleanly dispatches them via Google Workspace SMTP.
 
-## 1. Initial Setup
+## Architecture
 
-Open your terminal, navigate to this `crm` folder, and set up your environment:
+The system is composed of three sequential bots, managed by a master Python orchestrator:
+
+1.  **Bot 1: SMB Scraper (`smb_scraper.py` / `import_custom_leads.py`)**
+    *   Finds and extracts local businesses and their contact emails based on target keywords (e.g., "Gyms in Mississauga", "Boutiques in Toronto").
+    *   Alternatively, ingests manually curated CSV lists of target businesses.
+    *   Saves validated leads to the `smb_leads` SQLite database (`crm_database.db`).
+
+2.  **Bot 2: AI Infographic Generator (`infographic_bot.py`)**
+    *   Iterates over all "new" leads in the database.
+    *   Prompts the `gemini-2.5-flash` model to act as a world-class graphic designer, generating raw HTML code.
+    *   Injects niche-specific data pitches (e.g., "Food Variance Tracking" for restaurants vs "Member Churn" for gyms).
+    *   Outputs strictly styled, responsive, email-friendly CSS layouts holding the Dedolytics logo and the `$0 First Month` value proposition.
+
+3.  **Bot 3: SMTP Dispatcher (`smb_outreach.py`)**
+    *   Filters the database for un-sent, generated HTML payloads.
+    *   Wraps the raw code in a professional email container.
+    *   Rotates through multiple Google Workspace sender accounts (`hello@`, `ops@`, `contact@`) to distribute the sending volume and avoid spam flags.
+    *   Executes absolute database blocklisting (`email_sent = 'yes'`) and strict OS-level (`fcntl`) process locking to mathematically guarantee a recipient never receives a duplicate or concurrent email.
+
+## Setup & Dependencies
+
+1.  Clone the repository and initialize the Python virtual environment:
+    ```bash
+    python -m venv venv
+    source venv/bin/activate
+    pip install google-generativeai python-dotenv duckduckgo-search beautifulsoup4 playwright
+    playwright install
+    ```
+
+2.  Create a `.env` file in the root directory and populate your credentials:
+    ```env
+    GEMINI_API_KEY="your_google_ai_studio_key"
+    DB_PATH="crm_database.db"
+
+    EMAIL_1_ADDRESS="hello@dedolytics.org"
+    EMAIL_1_PASSWORD="your_app_password"
+
+    EMAIL_2_ADDRESS="ops@dedolytics.org"
+    EMAIL_2_PASSWORD="your_app_password"
+
+    EMAIL_3_ADDRESS="contact@dedolytics.org"
+    EMAIL_3_PASSWORD="your_app_password"
+    ```
+
+## Execution
+
+### Master Pipeline Orchestrator
+
+To run the entire system start-to-finish (Scrape -> Generate -> Dispatch):
 
 ```bash
-# 1. Create a Python Virtual Environment (recommended for Mac)
-# Note: Using python3.10 to ensure compatibility with pre-built library wheels
-python3.10 -m venv venv
-
-# 2. Activate the virtual environment
 source venv/bin/activate
-
-# 3. Install the python dependencies
-pip install -r requirements.txt
-
-# 4. Install Playwright browsers (required for the scraper)
-playwright install chromium
+python run_smb_pipeline.py
 ```
 
-> **Note:** Every time you manually run the scripts, make sure to activate the environment first using `source venv/bin/activate`.
-
-## 2. Configuration (`.env`)
-
-You **MUST** use [Google App Passwords](https://support.google.com/mail/answer/185833?hl=en) for your 3 email accounts. Regular passwords will fail due to Google's security policies.
-1. Go to your Google Account > Security > 2-Step Verification > App Passwords.
-2. Generate an App Password for "Mail".
-3. Open the `.env` file in this directory and replace `your-app-password-here` with the 16-letter generated passwords.
-
-## 3. Scheduling on Mac (Cron)
-
-You mentioned you want this to run locally on your Mac. The standard way to do this without keeping a terminal window open forever is using `crontab`.
-
-In your terminal, type:
+### Emergency Stop
+If you need to instantly abort an active run (e.g. rate-limit errors or infinite loops), execute the bash failsafe script to forcefully kill all lingering python processes:
 ```bash
-crontab -e
+./kill_all.sh
 ```
 
-Add these two lines to the bottom of the file (replace `/Users/kushalshah/Documents/Dedolytics/crm` with the exact absolute path if different, and ensure your python path is correct, e.g., `/usr/local/bin/python3` or just `python3`):
+## Testing / Development
+
+To generate a sample infographic and send a test mock-up to your personal inbox without touching the production database:
 
 ```bash
-# Run the Scraper Bot every 4 hours to find new jobs continuously
-0 */4 * * * cd /Users/kushalshah/Documents/Dedolytics/crm && python3 scraper_bot.py >> scraper.log 2>&1
-
-# Run the Outreach Bot every day at 08:50 AM EST
-50 8 * * * cd /Users/kushalshah/Documents/Dedolytics/crm && python3 outreach_bot.py >> outreach.log 2>&1
+source venv/bin/activate
+python test_smb_infographics.py your.email@example.com
 ```
 
-Save and exit. Your Mac will now run these bots automatically in the background as long as it is turned on.
-
-## Database Management
-The local SQLite database is stored in `crm_database.db`. You can view it using any free SQLite viewer (like "DB Browser for SQLite" for Mac).
+## Author
+Developed by the Dedolytics Engineering Team (2026).
