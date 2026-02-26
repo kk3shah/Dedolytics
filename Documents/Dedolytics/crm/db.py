@@ -69,6 +69,23 @@ def init_db():
     """
     )
 
+    # Create smb_leads table (New Pipeline)
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS smb_leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_name TEXT NOT NULL,
+        category TEXT,
+        email TEXT UNIQUE NOT NULL,
+        website TEXT,
+        infographic_html TEXT,
+        status TEXT DEFAULT 'new', -- 'new', 'generated', 'emailed'
+        last_emailed_date DATE,
+        email_sent TEXT DEFAULT 'no'
+    )
+    """
+    )
+
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
@@ -166,6 +183,81 @@ def log_email(job_id, contact_id, email_sent_from, template_used, subject):
     VALUES (?, ?, ?, ?, ?)
     """,
         (job_id, contact_id, email_sent_from, template_used, subject),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- SMB Leads Pipeline Functions ---
+
+
+def add_smb_lead(company_name, category, email, website=""):
+    """Inserts a new SMB lead. Ignores if email already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+        INSERT INTO smb_leads (company_name, category, email, website)
+        VALUES (?, ?, ?, ?)
+        """,
+            (company_name, category, email, website),
+        )
+        lead_id = cursor.lastrowid
+        conn.commit()
+        return lead_id
+    except sqlite3.IntegrityError:
+        return None  # Email already exists
+    finally:
+        conn.close()
+
+
+def get_pending_smb_infographics():
+    """Gets SMB leads that need an infographic generated."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, company_name, category, email, website FROM smb_leads WHERE status = 'new'")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def save_smb_infographic(lead_id, html_content):
+    """Saves the generated infographic HTML and updates status."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE smb_leads SET infographic_html = ?, status = 'generated' WHERE id = ?", (html_content, lead_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ready_smb_emails():
+    """Gets SMB leads with generated infographics that have never been emailed."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, company_name, category, email, infographic_html 
+        FROM smb_leads 
+        WHERE status = 'generated' 
+        AND email_sent != 'yes'
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_smb_emailed(lead_id):
+    """Marks an SMB lead as emailed permanently by setting email_sent = 'yes'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    todayStr = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute(
+        "UPDATE smb_leads SET status = 'emailed', last_emailed_date = ?, email_sent = 'yes' WHERE id = ?",
+        (todayStr, lead_id),
     )
     conn.commit()
     conn.close()

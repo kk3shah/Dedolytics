@@ -21,12 +21,12 @@ def run_all():
     print("==================================================")
 
     # 1. Run the scraper
-    print("\n[1/4] Starting Scraper Bot... (This will run for 5-10 minutes)")
+    print("\n[1/4] Starting Target Ingestion Bot... (Reading targets.csv)")
     try:
         # Run scraper bot synchronously
         subprocess.run(["python", "scraper_bot.py"], check=True)
     except subprocess.CalledProcessError as e:
-        print(f"\n[-] Scraper bot encountered an error: {e}")
+        print(f"\n[-] Ingestion bot encountered an error: {e}")
         return
 
     # 2. Run the Enrichment Engine
