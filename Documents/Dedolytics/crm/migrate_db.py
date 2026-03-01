@@ -20,6 +20,7 @@ MIGRATIONS = [
         "UPDATE smb_leads SET source = 'manual' WHERE source IS NULL OR source = 'places'",
     ),
     ("last_error", "TEXT", None),
+    ("business_description", "TEXT", None),
 ]
 
 

@@ -80,6 +80,7 @@ def init_db():
         phone TEXT,
         address TEXT,
         website TEXT,
+        business_description TEXT,
         infographic_html TEXT,
         status TEXT DEFAULT 'new', -- 'new', 'generated', 'emailed'
         last_emailed_date DATE,
@@ -198,7 +199,9 @@ def log_email(job_id, contact_id, email_sent_from, template_used, subject):
 # --- SMB Leads Pipeline Functions ---
 
 
-def add_smb_lead(company_name, category, email, website="", phone="", address="", source="places"):
+def add_smb_lead(
+    company_name, category, email, website="", phone="", address="", source="places", business_description=""
+):
     """Inserts a new SMB lead. Ignores if email already exists."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -206,10 +209,10 @@ def add_smb_lead(company_name, category, email, website="", phone="", address=""
         today = datetime.now().strftime("%Y-%m-%d")
         cursor.execute(
             """
-        INSERT INTO smb_leads (company_name, category, email, website, phone, address, source, date_scraped)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO smb_leads (company_name, category, email, website, phone, address, source, date_scraped, business_description)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-            (company_name, category, email, website, phone, address, source, today),
+            (company_name, category, email, website, phone, address, source, today, business_description),
         )
         lead_id = cursor.lastrowid
         conn.commit()
@@ -224,7 +227,9 @@ def get_pending_smb_infographics():
     """Gets SMB leads that need an infographic generated."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, company_name, category, email, website FROM smb_leads WHERE status = 'new'")
+    cursor.execute(
+        "SELECT id, company_name, category, email, website, business_description, address FROM smb_leads WHERE status = 'new'"
+    )
     rows = cursor.fetchall()
     conn.close()
     return rows

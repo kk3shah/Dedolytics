@@ -267,32 +267,81 @@ def verify_mx(email: str) -> bool:
 # ─── Website Scraping with Playwright ─────────────────────────────────────────
 
 
-def scrape_website_for_email(page, base_url: str, max_retries: int = 2) -> list[str]:
+def _extract_business_description(soup: BeautifulSoup) -> str:
     """
-    Scrapes a business website for email addresses.
+    Pulls a short business description from the website HTML.
+    Tries meta description, og:description, then first meaningful paragraph.
+    Returns a cleaned string (max 300 chars) or empty string.
+    """
+    # Priority 1: meta description
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc and meta_desc.get("content", "").strip():
+        desc = meta_desc["content"].strip()
+        if len(desc) > 20:
+            return desc[:300]
+
+    # Priority 2: og:description
+    og_desc = soup.find("meta", property="og:description")
+    if og_desc and og_desc.get("content", "").strip():
+        desc = og_desc["content"].strip()
+        if len(desc) > 20:
+            return desc[:300]
+
+    # Priority 3: First substantial <p> tag (skip navs, footers, etc.)
+    for p in soup.find_all("p"):
+        text = p.get_text(strip=True)
+        if len(text) > 40 and not any(
+            kw in text.lower() for kw in ["cookie", "privacy", "\u00a9", "copyright", "all rights"]
+        ):
+            return text[:300]
+
+    # Priority 4: h1 + h2 as a rough tagline
+    parts = []
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        parts.append(h1.get_text(strip=True))
+    h2 = soup.find("h2")
+    if h2 and h2.get_text(strip=True):
+        parts.append(h2.get_text(strip=True))
+    if parts:
+        return " \u2014 ".join(parts)[:300]
+
+    return ""
+
+
+def scrape_website_for_email_and_description(page, base_url: str, max_retries: int = 2) -> tuple[list[str], str]:
+    """
+    Scrapes a business website for email addresses AND a business description.
     Tries homepage first, then common contact page slugs.
-    Retries on failure.
+    Returns (emails_list, business_description).
     """
     slugs = ["", "/contact", "/contact-us", "/about", "/about-us", "/get-in-touch"]
+    best_description = ""
 
     for slug in slugs:
         url = base_url.rstrip("/") + slug
         for attempt in range(max_retries + 1):
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                # Give JS a moment to render
                 page.wait_for_timeout(1500)
                 html = page.content()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Always try to grab a description (homepage/about pages are best)
+                if not best_description:
+                    best_description = _extract_business_description(soup)
+
                 emails = extract_emails_relaxed(html, base_url)
                 if emails:
-                    return emails
+                    return emails, best_description
+
                 break  # Page loaded but no emails — try next slug
             except Exception:
                 if attempt < max_retries:
-                    time.sleep(2 * (attempt + 1))  # Exponential backoff
+                    time.sleep(2 * (attempt + 1))
                 continue
 
-    return []
+    return [], best_description
 
 
 # ─── Main Scraper ─────────────────────────────────────────────────────────────
@@ -401,14 +450,14 @@ def scrape_gta_smbs(target_leads: int = 100) -> dict:
                 if not name:
                     continue
 
-                # ── Try to find email ──
+                # ── Try to find email + description ──
                 email = None
+                description = ""
 
                 if website:
-                    # Scrape website for email
                     try:
                         stats["websites_scraped"] += 1
-                        emails = scrape_website_for_email(page, website)
+                        emails, description = scrape_website_for_email_and_description(page, website)
                         if emails:
                             email = emails[0]
                     except Exception as e:
@@ -438,6 +487,7 @@ def scrape_gta_smbs(target_leads: int = 100) -> dict:
                         phone=phone,
                         address=address,
                         source="places",
+                        business_description=description,
                     )
 
                     if lead_id:
@@ -445,7 +495,8 @@ def scrape_gta_smbs(target_leads: int = 100) -> dict:
                         stats["new_leads"] += 1
                         is_free = email.split("@")[1] in FREE_PROVIDERS
                         provider_tag = " (free)" if is_free else ""
-                        print(f"    [+] #{stats['new_leads']} {name} <{email}>{provider_tag} [{cat_label}]")
+                        desc_tag = f" | {description[:50]}..." if description else ""
+                        print(f"    [+] #{stats['new_leads']} {name} <{email}>{provider_tag} [{cat_label}]{desc_tag}")
                     else:
                         stats["duplicates"] += 1
 
