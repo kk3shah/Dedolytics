@@ -110,6 +110,20 @@ FOLLOWUP_TEMPLATES = [
 # ─── Email Sending ────────────────────────────────────────────────────────────
 
 
+def _html_to_plain_text(html_body):
+    """Extracts a meaningful plain-text version from HTML for the text/plain MIME part."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_body, "html.parser")
+    # Remove style/script tags
+    for tag in soup(["style", "script"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n", strip=True)
+    # Collapse excessive blank lines
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n\n".join(lines)
+
+
 def send_html_email(to_address, subject, html_body, sender_email, sender_password, sender_name):
     """Sends an HTML email via Google Workspace SMTP."""
     if not sender_email or not sender_password:
@@ -118,12 +132,20 @@ def send_html_email(to_address, subject, html_body, sender_email, sender_passwor
 
     try:
         msg = EmailMessage()
-        msg.set_content("Please enable HTML to view this email.")
+        # Use a meaningful plain-text version (spam filters penalize empty/generic text parts)
+        plain_text = _html_to_plain_text(html_body)
+        msg.set_content(plain_text)
         msg.add_alternative(html_body, subtype="html")
 
         msg["Subject"] = subject
         msg["From"] = f"{sender_name} <{sender_email}>"
         msg["To"] = to_address
+
+        # Reply-To ensures responses reach a monitored inbox
+        msg["Reply-To"] = "hello@dedolytics.org"
+
+        # List-Unsubscribe — required by Gmail/Yahoo since Feb 2024 for bulk senders
+        msg["List-Unsubscribe"] = "<mailto:unsubscribe@dedolytics.org?subject=Unsubscribe>"
 
         # Always BCC the founder for tracking
         msg["Bcc"] = "hello@dedolytics.org"
@@ -140,14 +162,19 @@ def send_html_email(to_address, subject, html_body, sender_email, sender_passwor
 
 
 def wrap_infographic_in_email(infographic_html):
-    """Wraps the naked infographic HTML in a minimalist layout with NO conversational text."""
+    """Wraps the infographic HTML in an email-safe layout with a brief intro line."""
     return f"""
     <html>
-      <body style="margin: 0; padding: 0; background-color: #f4f4f4; display: flex; justify-content: center;">
-        <!-- Clean, centered container -->
-        <div style="width: 100%; max-width: 600px; margin: 20px auto; background-color: transparent;">
-            {infographic_html}
-        </div>
+      <body style="margin: 0; padding: 0; background-color: #f4f4f4;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f4f4f4;">
+          <tr>
+            <td align="center" style="padding: 20px 0;">
+              <div style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff;">
+                {infographic_html}
+              </div>
+            </td>
+          </tr>
+        </table>
       </body>
     </html>
     """
@@ -203,7 +230,8 @@ def run_smb_outreach(dry_run: bool = False) -> dict:
         sender_account = valid_accounts[i % len(valid_accounts)]
         sender_email = sender_account["email"]
         sender_password = sender_account["password"]
-        sender_name = random.choice(SENDER_NAMES)
+        # Use lead_id to deterministically pick sender name so follow-ups come from the same "person"
+        sender_name = SENDER_NAMES[lead_id % len(SENDER_NAMES)]
 
         subject = f"Unlocking hidden profits at {company_name} (Custom Analytics)"
 
@@ -273,7 +301,8 @@ def run_followup_outreach(dry_run: bool = False) -> dict:
         sender_account = valid_accounts[i % len(valid_accounts)]
         sender_email = sender_account["email"]
         sender_password = sender_account["password"]
-        sender_name = random.choice(SENDER_NAMES)
+        # Same deterministic name as the initial email so follow-ups feel like the same person
+        sender_name = SENDER_NAMES[lead_id % len(SENDER_NAMES)]
 
         print(f"\n[*] Follow-up #{followup_count + 1} to {company_name} ({email})")
 

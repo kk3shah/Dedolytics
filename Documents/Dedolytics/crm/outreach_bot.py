@@ -1,10 +1,17 @@
+"""
+Dedolytics ABM Outreach Bot — AI-generated enterprise email campaigns.
+
+Generates hyper-personalized HTML emails using Gemini AI with dynamic
+case study injection, then dispatches via Google Workspace SMTP with
+sender rotation.
+"""
+
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from email.message import EmailMessage
 import os
+import time
+import random
 import db
-from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
 
@@ -17,9 +24,7 @@ EMAIL_ACCOUNTS = [
     {"email": os.getenv("EMAIL_3_ADDRESS"), "password": os.getenv("EMAIL_3_PASSWORD")},
 ]
 
-# SMTP Config for Gmail / Google Workspace
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
+SENDER_NAMES = ["Paul", "Ed", "Will"]
 
 # Configure Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -27,78 +32,11 @@ if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-api-key-here":
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def get_email_template(title, company, name, job_description=""):
-    """
-    Returns the appropriate email subject and body based on the job title.
-    Uses Google Gemini API to craft highly personalized emails if available.
-    Falls back to strong default templates if API key is missing or fails.
-    """
-    if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-api-key-here":
-        try:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            salutation_instruction = (
-                f"The target is {name}, who is likely the Hiring Manager or Head of Data at the company '{company}'."
-                if name
-                else f"You are emailing the Hiring Manager or Head of Data at the company '{company}'."
-            )
-
-            prompt = f"""
-            You are drafting a professional B2B outreach email for a company called 'Dedolytics'. 
-            Dedolytics specializes in Power BI, SQL, and Snowflake architecture, delivering enterprise-grade dashboards, 
-            data pipelines, and data engineering solutions.
-            
-            {salutation_instruction} They are currently hiring for an individual contributor role: '{title}'.
-            
-            Your goal is to pitch Dedolytics as an alternative or augmentation to hiring this '{title}' full-time. 
-            Highlight that using a specialized consulting strike-team avoids the timeline, overhead, and tax costs associated 
-            with a standard full-time hire, while providing immediate, expert-level leverage for their data roadmap.
-            Crucially, emphasize how Dedolytics brings significantly more robust value execution, speed, and cross-industry 
-            experience than a normal single '{title}' candidate could provide.
-            
-            Job Description context (if any):
-            {job_description[:1000]} # Trimmed to avoid excessive context sizes
-            
-            Rules:
-            1. Keep it very concise (under 150 words). Busy executives don't read essays.
-            2. Be professional, direct, and authoritative but friendly.
-            3. Do NOT include placeholder tags like [Your Name] or [Link]. Sign off as 'The Dedolytics Team' with the URL 'https://dedolytics.org'.
-            4. Start the response with 'SUBJECT: <the subject line>' on the first line. The rest should be the body.
-            5. If you do not have a specific name, use a professional general greeting like 'Hi there,' or 'Hello team at {company},'. NEVER make up a name.
-            """
-
-            response = model.generate_content(prompt)
-            output = response.text.strip().split("\n")
-
-            # Parse Subject and Body from Gemini response
-            if output[0].startswith("SUBJECT:"):
-                subject = output[0].replace("SUBJECT:", "").strip()
-                body = "\n".join(output[1:]).strip()
-                return subject, body
-        except Exception as e:
-            print(f"[-] Gemini AI Generation failed, falling back to static templates: {e}")
-
-    # --- FALLBACK STATIC TEMPLATES ---
-    title_lower = title.lower()
-
-
-import time
-
-# Configure APIs
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-SMTP_EMAIL = os.getenv("SMTP_EMAIL")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-
-import random
-
-SENDER_NAMES = ["Paul", "Ed", "Will"]
-
-
 def generate_abm_email_with_gemini(persona, company, contact_name, industry_note, sender_name):
     """
     Uses Gemini to craft a hyper-personalized HTML ABM email based on the Dedolytics case studies.
     """
-    if not os.getenv("GEMINI_API_KEY"):
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your-gemini-api-key-here":
         return "Subject: Chat about Data\nHi, let's chat about data at your company."
 
     model = genai.GenerativeModel("gemini-2.5-flash")
@@ -120,20 +58,20 @@ def generate_abm_email_with_gemini(persona, company, contact_name, industry_note
 
     prompt = f"""
     You are {sender_name}, a Partner at Dedolytics (https://www.dedolytics.org), a premium data consulting firm specializing in Power BI, SQL, and Snowflake.
-    
+
     Write a highly professional, short, punchy cold email to {first_name} (the {persona}) at {company} in RAW HTML format.
-    
+
     Instructions:
     1. Do not use generic corporate jargon. Be extremely direct and value-focused.
     2. Start the very first line of your output with "Subject: " followed by a catchy subject line.
     3. The rest of your output must be the raw HTML code for the email body. DO NOT output markdown code blocks (e.g. no ```html). Just the HTML.
     4. Use professional fonts (font-family: Arial, Helvetica, sans-serif;) and styling that looks clean and modern.
-    
+
     Content requirements:
     - Paragraph 1: Acknowledge their role scaling data operations at {company}.
     - Paragraph 2: Mention this exact scenario, and hyperlink the relevant phase to the case study URL: "{case_study_text}". (Link: {case_study_url})
     - Paragraph 3: End with a low-friction call to action asking for a quick 10-minute chat next week to show them the semantic model. Include this exact HTML anchor tag to let them book time: <a href="https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ2HePxAUUQzDdORvH9M7ZxCnczzZHTq6w_Ubpjy2STAQTLqYfAgCC9bqNidQSiguEqe1_1kJ_lx">Book some time with us</a>
-    
+
     Formatting and Signature requirement:
     - At the bottom of the email, include a highly professional email signature for {sender_name}.
     - The signature MUST include the Dedolytics logo image: <img src="https://www.dedolytics.org/assets/images/logo.jpeg" alt="Dedolytics Logo" width="150" />
@@ -154,6 +92,18 @@ def generate_abm_email_with_gemini(persona, company, contact_name, industry_note
         return fallback
 
 
+def _html_to_plain_text(html_body):
+    """Extracts a meaningful plain-text version from HTML for the text/plain MIME part."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_body, "html.parser")
+    for tag in soup(["style", "script"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n", strip=True)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n\n".join(lines)
+
+
 def send_email(to_address, subject, html_body, sender_email, sender_password, sender_name):
     """Sends an HTML email via Google Workspace SMTP."""
     if not sender_email or not sender_password:
@@ -162,12 +112,20 @@ def send_email(to_address, subject, html_body, sender_email, sender_password, se
 
     try:
         msg = EmailMessage()
-        msg.set_content("Please enable HTML to view this email.")
+        # Use a meaningful plain-text version (spam filters penalize empty/generic text parts)
+        plain_text = _html_to_plain_text(html_body)
+        msg.set_content(plain_text)
         msg.add_alternative(html_body, subtype="html")
 
         msg["Subject"] = subject
         msg["From"] = f"{sender_name} <{sender_email}>"
         msg["To"] = to_address
+
+        # Reply-To ensures responses reach a monitored inbox
+        msg["Reply-To"] = "hello@dedolytics.org"
+
+        # List-Unsubscribe — required by Gmail/Yahoo since Feb 2024 for bulk senders
+        msg["List-Unsubscribe"] = "<mailto:unsubscribe@dedolytics.org?subject=Unsubscribe>"
 
         # Always BCC the founder for tracking
         msg["Bcc"] = "hello@dedolytics.org"
