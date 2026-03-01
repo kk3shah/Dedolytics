@@ -10,7 +10,7 @@ Stages:
   1. SCRAPE  — Google Places API → Playwright email extraction (max 1 hr)
   2. GENERATE — Gemini AI infographic generation for new leads (max 1 hr)
   3. SEND    — Initial emails + follow-up emails
-  4. SUMMARY — Log results to crm/logs/YYYY-MM-DD.log
+  4. METRICS — Sync open tracking data + daily metrics summary
 
 Usage:
   python daily_pipeline.py              # Full run (sends real emails)
@@ -145,6 +145,52 @@ def run_stage_send(dry_run: bool = False) -> dict:
     return results
 
 
+def run_stage_metrics() -> dict:
+    """Stage 4: Sync open tracking data + compute daily metrics."""
+    logger.info("=" * 60)
+    logger.info("STAGE 4: METRICS — Sync Opens + Daily Report")
+    logger.info("=" * 60)
+
+    results = {"synced_opens": 0, "open_rate": 0, "bounce_rate": 0}
+
+    # Sync opens from tracking server
+    try:
+        from metrics import sync_opens
+
+        synced = sync_opens()
+        results["synced_opens"] = synced
+        logger.info(f"Synced {synced} new opens from tracking server.")
+    except Exception as e:
+        logger.warning(f"Open tracking sync skipped: {e}")
+
+    # Compute and log metrics
+    try:
+        import db
+
+        metrics = db.get_email_metrics(days=7)
+        results["open_rate"] = metrics.get("open_rate", 0)
+        results["bounce_rate"] = metrics.get("bounce_rate", 0)
+
+        logger.info("── 7-Day Email Performance ──")
+        logger.info(f"  Sent:         {metrics['total_sent']}")
+        logger.info(f"  Delivered:    {metrics['delivered']} ({metrics['delivery_rate']}%)")
+        logger.info(f"  Opened:       {metrics['total_opened']} ({metrics['open_rate']}% open rate)")
+        logger.info(f"  Bounced:      {metrics['total_bounced']} ({metrics['bounce_rate']}% bounce rate)")
+        if metrics["avg_hours_to_open"] is not None:
+            logger.info(f"  Avg Open Time: {metrics['avg_hours_to_open']} hrs")
+
+        # Log per-type breakdown
+        if metrics["by_type"]:
+            for etype, data in sorted(metrics["by_type"].items()):
+                rate = round(data["opened"] / data["sent"] * 100, 1) if data["sent"] > 0 else 0
+                logger.info(f"    {etype}: {data['sent']} sent, {data['opened']} opened ({rate}%)")
+
+    except Exception as e:
+        logger.warning(f"Metrics computation failed: {e}")
+
+    return results
+
+
 # ─── Main Pipeline ────────────────────────────────────────────────────────────
 
 
@@ -184,6 +230,12 @@ def run_pipeline(dry_run: bool = False):
     stage3_elapsed = time.time() - stage3_start
     logger.info(f"Stage 3 completed in {stage3_elapsed / 60:.1f} min\n")
 
+    # ── Stage 4: Metrics ──
+    stage4_start = time.time()
+    all_results["metrics"] = run_stage_metrics()
+    stage4_elapsed = time.time() - stage4_start
+    logger.info(f"Stage 4 completed in {stage4_elapsed:.1f} sec\n")
+
     # ── Summary ──
     total_elapsed = time.time() - pipeline_start
 
@@ -204,6 +256,12 @@ def run_pipeline(dry_run: bool = False):
     followups = send_results.get("followups", {})
     logger.info(
         f"  Stage 3 (Send):   {stage3_elapsed / 60:.1f} min — {initial.get('sent', 0)} initial, {followups.get('sent', 0)} follow-ups"
+    )
+
+    metrics_data = all_results.get("metrics", {})
+    logger.info(
+        f"  Stage 4 (Metrics): synced {metrics_data.get('synced_opens', 0)} opens — "
+        f"{metrics_data.get('open_rate', 0)}% open rate, {metrics_data.get('bounce_rate', 0)}% bounce rate"
     )
 
     # Check for any fatal errors

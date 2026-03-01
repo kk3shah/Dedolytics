@@ -11,6 +11,7 @@ email_sent='yes' prevents duplicate sends to the same address.
 import os
 import sys
 import time
+import uuid
 import smtplib
 from email.message import EmailMessage
 import db
@@ -124,11 +125,46 @@ def _html_to_plain_text(html_body):
     return "\n\n".join(lines)
 
 
-def send_html_email(to_address, subject, html_body, sender_email, sender_password, sender_name):
-    """Sends an HTML email via Google Workspace SMTP."""
+def _insert_tracking_pixel(html_body, tracking_id, base_url):
+    """Inserts a 1x1 invisible tracking pixel into the HTML email body."""
+    pixel_url = f"{base_url}/pixel/{tracking_id}.png"
+    pixel_tag = (
+        f'<img src="{pixel_url}" width="1" height="1" alt="" '
+        f'style="display:block;width:1px;height:1px;border:0;opacity:0;" />'
+    )
+    # Insert before </body> if present
+    lower = html_body.lower()
+    idx = lower.rfind("</body>")
+    if idx != -1:
+        return html_body[:idx] + pixel_tag + html_body[idx:]
+    # Fall back to before </html>
+    idx = lower.rfind("</html>")
+    if idx != -1:
+        return html_body[:idx] + pixel_tag + html_body[idx:]
+    # Last resort: append
+    return html_body + pixel_tag
+
+
+def send_html_email(to_address, subject, html_body, sender_email, sender_password, sender_name, tracking_id=None):
+    """
+    Sends an HTML email via Google Workspace SMTP.
+
+    If tracking_id is provided and TRACKING_BASE_URL is set, inserts a 1x1
+    tracking pixel before sending.
+
+    Returns dict:
+      {"success": True}  — sent successfully
+      {"success": True, "simulated": True}  — no credentials (dev mode)
+      {"success": False, "bounce_status": "hard_bounce"|"soft_bounce"|None, "bounce_message": "..."}
+    """
+    # Insert tracking pixel if configured
+    tracking_base_url = os.getenv("TRACKING_BASE_URL", "")
+    if tracking_id and tracking_base_url:
+        html_body = _insert_tracking_pixel(html_body, tracking_id, tracking_base_url)
+
     if not sender_email or not sender_password:
         print("      [!] Email simulation (Credentials missing)")
-        return True
+        return {"success": True, "simulated": True}
 
     try:
         msg = EmailMessage()
@@ -155,10 +191,23 @@ def send_html_email(to_address, subject, html_body, sender_email, sender_passwor
         server.login(sender_email, sender_password)
         server.send_message(msg)
         server.quit()
-        return True
+        return {"success": True}
+
+    except smtplib.SMTPRecipientsRefused as e:
+        print(f"      [-] HARD BOUNCE — recipient rejected: {to_address}: {e}")
+        return {"success": False, "bounce_status": "hard_bounce", "bounce_message": str(e)}
+
+    except smtplib.SMTPSenderRefused as e:
+        print(f"      [-] Sender refused for {to_address}: {e}")
+        return {"success": False, "bounce_status": "soft_bounce", "bounce_message": str(e)}
+
+    except smtplib.SMTPDataError as e:
+        print(f"      [-] SMTP data error (possible spam filter) for {to_address}: {e}")
+        return {"success": False, "bounce_status": "soft_bounce", "bounce_message": str(e)}
+
     except Exception as e:
         print(f"      [-] Failed to send SMTP email to {to_address} from {sender_email}: {e}")
-        return False
+        return {"success": False, "bounce_status": None, "bounce_message": str(e)}
 
 
 def wrap_infographic_in_email(infographic_html):
@@ -243,15 +292,31 @@ def run_smb_outreach(dry_run: bool = False) -> dict:
             continue
 
         final_html_body = wrap_infographic_in_email(infographic_html)
+        tracking_id = str(uuid.uuid4())
 
         try:
-            if send_html_email(email, subject, final_html_body, sender_email, sender_password, sender_name):
+            result = send_html_email(
+                email,
+                subject,
+                final_html_body,
+                sender_email,
+                sender_password,
+                sender_name,
+                tracking_id=tracking_id,
+            )
+            if result["success"]:
                 print(f"      [+] Infographic emailed successfully to {email}")
                 db.mark_smb_emailed(lead_id)
+                db.create_email_event(lead_id, "initial", tracking_id)
                 stats["sent"] += 1
             else:
                 stats["failed"] += 1
-                db.set_lead_error(lead_id, "SMTP send returned False")
+                error_msg = result.get("bounce_message", "SMTP send failed")
+                db.set_lead_error(lead_id, error_msg)
+                # Record bounce in email_events for metrics
+                if result.get("bounce_status"):
+                    db.create_email_event(lead_id, "initial", tracking_id)
+                    db.record_bounce(tracking_id, result["bounce_status"], error_msg)
         except Exception as e:
             print(f"      [-] Error sending to {email}: {e}")
             stats["failed"] += 1
@@ -311,14 +376,31 @@ def run_followup_outreach(dry_run: bool = False) -> dict:
             stats["sent"] += 1
             continue
 
+        tracking_id = str(uuid.uuid4())
+        event_type = f"followup_{followup_count + 1}"
+
         try:
-            if send_html_email(email, subject, html_body, sender_email, sender_password, sender_name):
+            result = send_html_email(
+                email,
+                subject,
+                html_body,
+                sender_email,
+                sender_password,
+                sender_name,
+                tracking_id=tracking_id,
+            )
+            if result["success"]:
                 print(f"      [+] Follow-up sent to {email}")
                 db.mark_followup_sent(lead_id)
+                db.create_email_event(lead_id, event_type, tracking_id)
                 stats["sent"] += 1
             else:
                 stats["failed"] += 1
-                db.set_lead_error(lead_id, f"Follow-up {followup_count + 1} SMTP failed")
+                error_msg = result.get("bounce_message", f"Follow-up {followup_count + 1} SMTP failed")
+                db.set_lead_error(lead_id, error_msg)
+                if result.get("bounce_status"):
+                    db.create_email_event(lead_id, event_type, tracking_id)
+                    db.record_bounce(tracking_id, result["bounce_status"], error_msg)
         except Exception as e:
             print(f"      [-] Error sending follow-up to {email}: {e}")
             stats["failed"] += 1

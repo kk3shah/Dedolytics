@@ -7,3 +7,5 @@ python-dotenv==1.0.1
 pydantic==2.6.4
 requests>=2.31.0
 dnspython>=2.4.0
+flask>=3.0.0
+gunicorn>=21.2.0
