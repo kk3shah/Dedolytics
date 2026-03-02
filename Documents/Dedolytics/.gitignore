@@ -3,5 +3,6 @@
 crm/.env
 crm/venv/
 crm/crm_database.db
+crm/tracking_events.db
 crm/__pycache__/
 crm/logs/*.log
